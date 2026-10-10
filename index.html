@@ -1701,12 +1701,43 @@
             }
         }
 
+        function checkKingSurvival() {
+            const whiteKing = getKingSquare('w');
+            const blackKing = getKingSquare('b');
+
+            if (!whiteKing && !blackKing) {
+                isGameOver = true;
+                soundFx.play('victory');
+                recordGameResult('draw', 'Гибель обоих Королей');
+                showGameOver('ОБА КОРОЛЯ ПАЛИ!', 'Ничья — оба короля уничтожены!');
+                return false;
+            }
+            if (!whiteKing) {
+                isGameOver = true;
+                soundFx.play('victory');
+                recordGameResult('b', 'Потеря Короля');
+                showGameOver('КОРОЛЬ ПАЛ!', 'Белый король погиб! Победу одержали Черные!');
+                return false;
+            }
+            if (!blackKing) {
+                isGameOver = true;
+                soundFx.play('victory');
+                recordGameResult('w', 'Потеря Короля');
+                showGameOver('КОРОЛЬ ПАЛ!', 'Черный король погиб! Победу одержали Белые!');
+                return false;
+            }
+            return true;
+        }
+
         function finishTurn() {
+            if (!checkKingSurvival()) return;
+
             if (turn === 'b') {
                 fullMovesCount++;
 
                 if (eventsMode) {
                     processBurningSquares();
+                    if (!checkKingSurvival()) return;
                 }
 
                 for (const key in frozenPieces) {
@@ -1733,10 +1764,13 @@
 
                 if (eventsMode && fullMovesCount > 0 && fullMovesCount % 5 === 0) {
                     triggerRandomEvent();
+                    if (!checkKingSurvival()) return;
                 }
             }
 
             turn = turn === 'w' ? 'b' : 'w';
+
+            if (!checkKingSurvival()) return;
 
             const hasMoves = playerHasLegalMoves(turn);
             const inCheck = isKingInCheck(turn, board);
@@ -1820,64 +1854,95 @@
         function makeBotMove() {
             if (isGameOver) return;
 
+            // 1. Differentiated Spell Strategy per Difficulty
             if (chaosMode) {
-                if (spellCooldowns.b.freeze === 0) {
-                    const whiteTargets = [];
-                    for (let r = 0; r < 8; r++) {
-                        for (let c = 0; c < 8; c++) {
-                            const p = board[r][c];
-                            if (p && isWhite(p) && p.toLowerCase() !== 'k' && !frozenPieces[`${r},${c}`]) {
-                                // Priority system: Queen > Rook > Bishop/Knight > Pawn
-                                let priority = 10;
-                                if (p === 'Q') priority = 90;
-                                else if (p === 'R') priority = 50;
-                                else if (p === 'B' || p === 'N') priority = 30;
-                                else if (p === 'P') priority = 15;
-
-                                // Extra priority if white piece is currently attacking any black piece
-                                const attacks = getBasicAttacks(r, c, board);
-                                const isThreatening = attacks.some(a => board[a.r][a.c] && isBlack(board[a.r][a.c]));
-                                if (isThreatening) priority += 25;
-
-                                whiteTargets.push({ r, c, val: priority, piece: p });
-                            }
-                        }
-                    }
-                    whiteTargets.sort((a, b) => b.val - a.val);
-                    if (whiteTargets.length > 0) {
-                        const target = whiteTargets[0];
-                        frozenPieces[`${target.r},${target.c}`] = 2; // Black spell duration 2 (decrements at finishTurn)
-                        spellCooldowns.b.freeze = 6;
-                        soundFx.play('spell');
-                        const pieceName = PIECES[target.piece]?.name || 'фигуру';
-                        showToast(`Бот заморозил ваш ${pieceName}!`, 'warning');
-                    }
-                }
-
-                if (spellCooldowns.b.wall === 0) {
-                    const kingPos = getKingSquare('b');
-                    if (kingPos) {
-                        const emptyAdj = [];
-                        for (let dr = -1; dr <= 1; dr++) {
-                            for (let dc = -1; dc <= 1; dc++) {
-                                const tr = kingPos.r + dr, tc = kingPos.c + dc;
-                                if (tr >= 0 && tr < 8 && tc >= 0 && tc < 8 && !board[tr][tc]) {
-                                    emptyAdj.push({ r: tr, c: tc });
+                if (botDifficulty === 'easy') {
+                    // EASY: 20% chance to freeze a random piece; rarely places walls
+                    if (spellCooldowns.b.freeze === 0 && Math.random() < 0.20) {
+                        const candidates = [];
+                        for (let r = 0; r < 8; r++) {
+                            for (let c = 0; c < 8; c++) {
+                                const p = board[r][c];
+                                if (p && isWhite(p) && p.toLowerCase() !== 'k' && !frozenPieces[`${r},${c}`]) {
+                                    candidates.push({ r, c });
                                 }
                             }
                         }
-                        if (emptyAdj.length > 0) {
-                            const target = emptyAdj[Math.floor(Math.random() * emptyAdj.length)];
-                            board[target.r][target.c] = 'W';
-                            tempWalls[`${target.r},${target.c}`] = 4;
-                            spellCooldowns.b.wall = 10;
+                        if (candidates.length > 0) {
+                            const target = candidates[Math.floor(Math.random() * candidates.length)];
+                            frozenPieces[`${target.r},${target.c}`] = 2;
+                            spellCooldowns.b.freeze = 6;
                             soundFx.play('spell');
-                            showToast('Бот возвёл защитную стену!', 'warning');
+                            showToast(`Бот (Новичок) случайно заморозил фигуру!`, 'warning');
+                        }
+                    }
+                } else {
+                    // MEDIUM & HARD: High intelligence spell usage
+                    if (spellCooldowns.b.freeze === 0) {
+                        const whiteTargets = [];
+                        for (let r = 0; r < 8; r++) {
+                            for (let c = 0; c < 8; c++) {
+                                const p = board[r][c];
+                                if (p && isWhite(p) && p.toLowerCase() !== 'k' && !frozenPieces[`${r},${c}`]) {
+                                    let priority = 10;
+                                    if (p === 'Q') priority = 100;
+                                    else if (p === 'R') priority = 60;
+                                    else if (p === 'B' || p === 'N') priority = 35;
+                                    else if (p === 'P') priority = 15;
+
+                                    const attacks = getBasicAttacks(r, c, board);
+                                    const isThreatening = attacks.some(a => board[a.r][a.c] && isBlack(board[a.r][a.c]));
+                                    if (isThreatening) priority += 30;
+
+                                    // HARD: Emergency freeze if piece threatens Black King
+                                    if (botDifficulty === 'hard') {
+                                        const bKing = getKingSquare('b');
+                                        if (bKing && attacks.some(a => a.r === bKing.r && a.c === bKing.c)) {
+                                            priority += 200;
+                                        }
+                                    }
+
+                                    whiteTargets.push({ r, c, val: priority, piece: p });
+                                }
+                            }
+                        }
+                        whiteTargets.sort((a, b) => b.val - a.val);
+                        if (whiteTargets.length > 0 && (botDifficulty === 'hard' || Math.random() < 0.75)) {
+                            const target = whiteTargets[0];
+                            frozenPieces[`${target.r},${target.c}`] = 2;
+                            spellCooldowns.b.freeze = 6;
+                            soundFx.play('spell');
+                            const pieceName = PIECES[target.piece]?.name || 'фигуру';
+                            showToast(`Бот (${botDifficulty === 'hard' ? 'Продвинутый' : 'Средний'}) заморозил ваш ${pieceName}!`, 'warning');
+                        }
+                    }
+
+                    if (spellCooldowns.b.wall === 0) {
+                        const kingPos = getKingSquare('b');
+                        if (kingPos) {
+                            const emptyAdj = [];
+                            for (let dr = -1; dr <= 1; dr++) {
+                                for (let dc = -1; dc <= 1; dc++) {
+                                    const tr = kingPos.r + dr, tc = kingPos.c + dc;
+                                    if (tr >= 0 && tr < 8 && tc >= 0 && tc < 8 && !board[tr][tc]) {
+                                        emptyAdj.push({ r: tr, c: tc });
+                                    }
+                                }
+                            }
+                            if (emptyAdj.length > 0 && (botDifficulty === 'hard' || Math.random() < 0.5)) {
+                                const target = emptyAdj[Math.floor(Math.random() * emptyAdj.length)];
+                                board[target.r][target.c] = 'W';
+                                tempWalls[`${target.r},${target.c}`] = 4;
+                                spellCooldowns.b.wall = 10;
+                                soundFx.play('spell');
+                                showToast('Бот возвёл защитную стену!', 'warning');
+                            }
                         }
                     }
                 }
             }
 
+            // 2. Collect All Legal Moves
             const allMoves = [];
             for (let r = 0; r < 8; r++) {
                 for (let c = 0; c < 8; c++) {
@@ -1891,8 +1956,20 @@
 
             if (allMoves.length === 0) return;
 
+            // EASY DIFFICULTY: 35% chance to make a completely random move (blunder)
+            if (botDifficulty === 'easy' && Math.random() < 0.35) {
+                const randomMove = allMoves[Math.floor(Math.random() * allMoves.length)];
+                if (randomMove.to.isBreakWall) {
+                    breakWall(randomMove.from, randomMove.to);
+                } else {
+                    makeMove(randomMove.from, randomMove.to);
+                }
+                return;
+            }
+
             const prevBlackMove = lastMoveByColor.b;
 
+            // 3. Move Evaluation
             allMoves.forEach(item => {
                 let score = 0;
                 const fromP = board[item.from.r][item.from.c];
@@ -1900,96 +1977,105 @@
                 const targetP = board[item.to.r][item.to.c];
                 const pieceVal = PIECES[fromP]?.val || 1;
 
-                // 1. Material Gain / Captures
+                // Captures
                 if (targetP && targetP !== 'W') {
-                    score += (PIECES[targetP]?.val || 1) * 12 - pieceVal;
+                    const captureMult = botDifficulty === 'hard' ? 18 : botDifficulty === 'medium' ? 12 : 5;
+                    score += (PIECES[targetP]?.val || 1) * captureMult - pieceVal;
                 }
 
-                // 2. Breaking walls
-                if (item.to.isBreakWall) score += 10;
+                // Wall breaking
+                if (item.to.isBreakWall) score += (botDifficulty === 'easy' ? 2 : 10);
 
-                // 3. Positional table (PST) - Corrected for Black (flipped rank indexing)
-                if (PST[typeP]) {
+                // Positional Tables (PST)
+                if (botDifficulty !== 'easy' && PST[typeP]) {
                     const fromPst = PST[typeP][7 - item.from.r][item.from.c];
                     const toPst = PST[typeP][7 - item.to.r][item.to.c];
-                    score += (toPst - fromPst);
+                    score += (toPst - fromPst) * (botDifficulty === 'hard' ? 1.5 : 1.0);
                 }
 
-                // 4. Anti-oscillation / Repetition Penalty
+                // Repetition / Shuffling Penalties
                 if (prevBlackMove && 
                     item.from.r === prevBlackMove.to.r && item.from.c === prevBlackMove.to.c &&
                     item.to.r === prevBlackMove.from.r && item.to.c === prevBlackMove.from.c) {
-                    score -= 200;
+                    score -= 250;
                 }
 
-                // Penalty for repeatedly moving the exact same piece consecutively without capturing
                 if (prevBlackMove && item.from.r === prevBlackMove.to.r && item.from.c === prevBlackMove.to.c && !targetP) {
-                    score -= 18;
+                    score -= 30;
                 }
 
-                // Penalty for useless Rook shuffling back and forth without attacks
                 if (typeP === 'r' && !targetP && !item.to.isBreakWall) {
-                    score -= 15;
+                    score -= 20;
                 }
 
-                // Center control & opening development bonuses
+                // Center & Opening Development
                 if (typeP === 'p') {
                     score += 8;
-                    // Extra bonus for central pawn advances (d7-d5, e7-e5, c7-c5)
-                    if ((item.to.c === 3 || item.to.c === 4) && (item.to.r === 2 || item.to.r === 3)) score += 12;
+                    if ((item.to.c === 3 || item.to.c === 4) && (item.to.r === 2 || item.to.r === 3)) score += 15;
                 }
-                if (typeP === 'n' || typeP === 'b') score += 8;
+                if (typeP === 'n' || typeP === 'b') score += 10;
 
-                // Opening randomizer / diversity jitter (adds rich variety in early game)
+                // Opening Random Jitter
                 if (fullMovesCount < 8) {
-                    score += Math.random() * 14;
-                    if (typeP === 'p' && item.from.r === 1) {
-                        score += Math.random() * 10;
-                    }
+                    score += Math.random() * (botDifficulty === 'easy' ? 25 : botDifficulty === 'medium' ? 12 : 4);
+                    if (typeP === 'p' && item.from.r === 1) score += Math.random() * 10;
                 }
 
-                // 5. Escaping attack bonus
+                // Escape from attack
                 const isCurrentlyAttacked = isSquareAttacked(item.from.r, item.from.c, 'b', board);
                 if (isCurrentlyAttacked) {
-                    score += pieceVal * 6;
+                    score += pieceVal * (botDifficulty === 'hard' ? 10 : 5);
                 }
 
-                // 6. Tactical simulation on temp board
+                // Tactical Simulation
                 const tempB = cloneBoard(board);
                 executeMoveOnBoard(tempB, item.from, item.to);
 
-                // Hanging piece check: avoid moving to squares attacked by white without adequate defense/value
+                // Hanging Piece Safety
                 const isTargetAttacked = isSquareAttacked(item.to.r, item.to.c, 'b', tempB);
                 if (isTargetAttacked) {
                     const targetVal = targetP ? (PIECES[targetP]?.val || 1) : 0;
                     if (pieceVal > targetVal) {
-                        score -= (pieceVal - targetVal) * 8;
+                        const penaltyMult = botDifficulty === 'hard' ? 22 : botDifficulty === 'medium' ? 10 : 2;
+                        score -= (pieceVal - targetVal) * penaltyMult;
                     }
                 }
 
-                // Check and Checkmate incentives
+                // Checks & Mate Threat
                 if (isKingInCheck('w', tempB)) {
-                    score += 20;
+                    score += botDifficulty === 'hard' ? 45 : 15;
                     if (!playerHasLegalMoves('w')) {
-                        score += 2000;
+                        score += 5000;
                     }
                 }
 
-                // 7. Burning square awareness
-                if (burningSquares.some(bs => bs.r === item.from.r && bs.c === item.from.c)) score += 50;
-                if (burningSquares.some(bs => bs.r === item.to.r && bs.c === item.to.c)) score -= 80;
+                // Hazards
+                if (burningSquares.some(bs => bs.r === item.from.r && bs.c === item.from.c)) score += 60;
+                if (burningSquares.some(bs => bs.r === item.to.r && bs.c === item.to.c)) score -= 100;
 
                 item.score = score;
             });
 
             allMoves.sort((a, b) => b.score - a.score);
 
-            const topScore = allMoves[0].score;
-            // Depending on difficulty, filter top candidate moves
-            const margin = botDifficulty === 'hard' ? 4 : botDifficulty === 'easy' ? 20 : 10;
-            const topCandidateMoves = allMoves.filter(m => (topScore - m.score) <= margin);
-            
-            const chosenMove = topCandidateMoves[Math.floor(Math.random() * topCandidateMoves.length)];
+            let chosenMove;
+
+            if (botDifficulty === 'hard') {
+                // HARD: Always picks strict top score (random among ties)
+                const topScore = allMoves[0].score;
+                const topMoves = allMoves.filter(m => m.score === topScore);
+                chosenMove = topMoves[Math.floor(Math.random() * topMoves.length)];
+            } else if (botDifficulty === 'medium') {
+                // MEDIUM: Picks within a tight score margin (top 12 points)
+                const topScore = allMoves[0].score;
+                const topCandidateMoves = allMoves.filter(m => (topScore - m.score) <= 12);
+                chosenMove = topCandidateMoves[Math.floor(Math.random() * topCandidateMoves.length)];
+            } else {
+                // EASY: Picks from upper 40% candidate moves for inaccurate play
+                const candidateCutoff = Math.max(1, Math.floor(allMoves.length * 0.4));
+                const easyCandidates = allMoves.slice(0, candidateCutoff);
+                chosenMove = easyCandidates[Math.floor(Math.random() * easyCandidates.length)];
+            }
 
             if (chosenMove.to.isBreakWall) {
                 breakWall(chosenMove.from, chosenMove.to);
