@@ -24,7 +24,7 @@
     <!-- FontAwesome icons for UI -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- PeerJS for P2P Online Multiplayer -->
-    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
 
     <style>
         ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -904,6 +904,18 @@
         let myOnlineRole = 'w';
         let roomCode = '';
 
+        const peerIceConfig = {
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' },
+                    { urls: 'stun:stun4.l.google.com:19302' }
+                ]
+            }
+        };
+
         // Positional Piece-Square Tables for Bot Intelligence
         const PST = {
             p: [
@@ -1596,9 +1608,20 @@
                 moveHistoryPGN.push(moveStr);
 
                 const isBotTurn = gameMode === 'bot' && turn === 'b';
-                if (piece.toLowerCase() === 'p' && (move.r === 0 || move.r === 7) && !isBotTurn && (gameMode !== 'online' || turn === myOnlineRole)) {
-                    showPromotionModal(move.r, move.c, isWhitePiece);
-                    return;
+                const isPromotion = piece.toLowerCase() === 'p' && (move.r === 0 || move.r === 7);
+                if (isPromotion) {
+                    if (gameMode === 'online') {
+                        if (turn === myOnlineRole) {
+                            showPromotionModal(move.r, move.c, isWhitePiece);
+                            return;
+                        } else {
+                            // Waiting for opponent's PROMOTION_CHOICE message, don't finish turn yet
+                            return;
+                        }
+                    } else if (!isBotTurn) {
+                        showPromotionModal(move.r, move.c, isWhitePiece);
+                        return;
+                    }
                 }
 
                 finishTurn();
@@ -2379,18 +2402,36 @@
             return code;
         }
 
+        function updateOnlineUIStatus(text, color) {
+            const statusEl = document.getElementById('online-status-text');
+            const roleEl = document.getElementById('online-role-text');
+            if (statusEl) {
+                let colorClass = 'text-emerald-400';
+                let dotClass = 'bg-emerald-400';
+                if (color === 'amber') { colorClass = 'text-amber-400'; dotClass = 'bg-amber-400'; }
+                if (color === 'rose') { colorClass = 'text-rose-400'; dotClass = 'bg-rose-400'; }
+                statusEl.className = `${colorClass} flex items-center gap-1.5 font-medium`;
+                statusEl.innerHTML = `<span class="w-2 h-2 rounded-full ${dotClass} animate-pulse"></span> ${text}`;
+            }
+            if (roleEl) {
+                roleEl.innerText = myOnlineRole === 'w' ? '(Вы: Белые)' : '(Вы: Черные)';
+            }
+        }
+
         function createOnlineRoom() {
+            if (peer) { try { peer.destroy(); } catch(e){} }
             roomCode = generateRoomCode();
             myOnlineRole = 'w';
             isFlipped = false;
 
-            document.getElementById('online-role-text').innerText = '(Вы: Белые)';
+            updateOnlineUIStatus('Создание комнаты...', 'amber');
             document.getElementById('room-code-display').innerText = roomCode;
             document.getElementById('online-info-box').classList.remove('hidden');
 
-            peer = new Peer(`tchess-${roomCode}`);
+            peer = new Peer(`tchess-${roomCode}`, peerIceConfig);
 
             peer.on('open', () => {
+                updateOnlineUIStatus('Ожидание соперника...', 'amber');
                 showToast(`Комната создана! Код: ${roomCode}`, 'success');
             });
 
@@ -2398,46 +2439,68 @@
                 conn = c;
                 setupOnlineConnection();
                 showToast('Соперник подключился!', 'success');
-                sendOnlineData({
-                    type: 'INIT_STATE',
-                    eventsMode,
-                    chaosMode,
-                    timerMode
-                });
             });
 
             peer.on('error', (err) => {
                 console.error("PeerJS Error:", err);
-                showToast('Ошибка сетевого подключения', 'warning');
+                updateOnlineUIStatus('Ошибка подключения', 'rose');
+                if (err.type === 'unavailable-id') {
+                    showToast('Код занят, создайте комнату повторно', 'warning');
+                } else {
+                    showToast('Ошибка подключения к сетевому серверу', 'warning');
+                }
             });
         }
 
         function joinOnlineRoom(code) {
             if (!code) return;
+            if (peer) { try { peer.destroy(); } catch(e){} }
             roomCode = code.toUpperCase();
             myOnlineRole = 'b';
             isFlipped = true;
 
-            document.getElementById('online-role-text').innerText = '(Вы: Черные)';
+            updateOnlineUIStatus('Подключение к комнате...', 'amber');
             document.getElementById('room-code-display').innerText = roomCode;
             document.getElementById('online-info-box').classList.remove('hidden');
 
-            peer = new Peer();
+            peer = new Peer(peerIceConfig);
 
             peer.on('open', () => {
-                conn = peer.connect(`tchess-${roomCode}`);
+                conn = peer.connect(`tchess-${roomCode}`, { reliable: true });
                 setupOnlineConnection();
             });
 
             peer.on('error', (err) => {
                 console.error("PeerJS Connect Error:", err);
+                updateOnlineUIStatus('Ошибка подключения', 'rose');
                 showToast('Не удалось подключиться к комнате', 'warning');
             });
         }
 
         function setupOnlineConnection() {
+            if (!conn) return;
+
             conn.on('open', () => {
+                updateOnlineUIStatus('Идет сетевая игра', 'emerald');
                 showToast('Сетевое соединение установлено!', 'success');
+
+                if (myOnlineRole === 'w') {
+                    sendOnlineData({
+                        type: 'INIT_STATE',
+                        eventsMode,
+                        chaosMode,
+                        timerMode,
+                        board: cloneBoard(board),
+                        turn,
+                        castlingRights: JSON.parse(JSON.stringify(castlingRights)),
+                        enPassantTarget,
+                        spellCooldowns: JSON.parse(JSON.stringify(spellCooldowns)),
+                        frozenPieces: JSON.parse(JSON.stringify(frozenPieces)),
+                        tempWalls: JSON.parse(JSON.stringify(tempWalls)),
+                        fullMovesCount,
+                        burningSquares: JSON.parse(JSON.stringify(burningSquares))
+                    });
+                }
             });
 
             conn.on('data', (data) => {
@@ -2445,7 +2508,13 @@
             });
 
             conn.on('close', () => {
-                showToast('Соперник отключился', 'warning');
+                updateOnlineUIStatus('Соперник отключился', 'rose');
+                showToast('Соперник отключился от игры', 'warning');
+            });
+
+            conn.on('error', (err) => {
+                console.error("Conn Error:", err);
+                showToast('Ошибка сетевого соединения', 'warning');
             });
         }
 
@@ -2484,10 +2553,24 @@
                 eventsMode = data.eventsMode;
                 chaosMode = data.chaosMode;
                 timerMode = data.timerMode;
+                if (data.board) board = data.board;
+                if (data.turn) turn = data.turn;
+                if (data.castlingRights) castlingRights = data.castlingRights;
+                if (data.enPassantTarget !== undefined) enPassantTarget = data.enPassantTarget;
+                if (data.spellCooldowns) spellCooldowns = data.spellCooldowns;
+                if (data.frozenPieces) frozenPieces = data.frozenPieces;
+                if (data.tempWalls) tempWalls = data.tempWalls;
+                if (data.fullMovesCount !== undefined) fullMovesCount = data.fullMovesCount;
+                if (data.burningSquares) burningSquares = data.burningSquares;
+
                 document.getElementById('events-mode-toggle').checked = eventsMode;
                 document.getElementById('chaos-mode-toggle').checked = chaosMode;
                 document.getElementById('timer-setting').value = timerMode;
-                resetGame();
+                
+                resetTimers();
+                renderBoard();
+                updateUI();
+                showToast('Синхронизация завершена!', 'success');
             } else if (data.type === 'TIMER_CHANGE') {
                 timerMode = data.val;
                 document.getElementById('timer-setting').value = timerMode;
