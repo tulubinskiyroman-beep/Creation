@@ -406,9 +406,14 @@
                             <span class="text-slate-400">Код комнаты:</span>
                             <span id="room-code-display" class="font-bold text-amber-400 text-xs">------</span>
                         </div>
-                        <button onclick="copyRoomLink()" class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 py-1 rounded text-[11px] font-sans flex items-center justify-center gap-1 border border-slate-700 transition">
-                            <i class="fa-regular fa-copy"></i> Скопировать ссылку
-                        </button>
+                        <div class="flex gap-1.5 pt-1">
+                            <button onclick="copyRoomLink()" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 py-1 rounded text-[11px] font-sans flex items-center justify-center gap-1 border border-slate-700 transition">
+                                <i class="fa-regular fa-copy"></i> Ссылка
+                            </button>
+                            <button onclick="requestOnlineSync()" title="Синхронизировать доску при сбое" class="bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 px-2 py-1 rounded text-[11px] font-sans flex items-center justify-center gap-1 border border-indigo-700/60 transition">
+                                <i class="fa-solid fa-arrows-rotate text-xs"></i> Синхро
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -1839,6 +1844,9 @@
         }
 
         function triggerRandomEvent() {
+            // In online mode, host (white) generates events to prevent desync
+            if (gameMode === 'online' && myOnlineRole !== 'w') return;
+
             soundFx.play('event');
             const eventType = Math.random() < 0.5 ? 'wall' : 'fire';
 
@@ -2485,21 +2493,7 @@
                 showToast('Сетевое соединение установлено!', 'success');
 
                 if (myOnlineRole === 'w') {
-                    sendOnlineData({
-                        type: 'INIT_STATE',
-                        eventsMode,
-                        chaosMode,
-                        timerMode,
-                        board: cloneBoard(board),
-                        turn,
-                        castlingRights: JSON.parse(JSON.stringify(castlingRights)),
-                        enPassantTarget,
-                        spellCooldowns: JSON.parse(JSON.stringify(spellCooldowns)),
-                        frozenPieces: JSON.parse(JSON.stringify(frozenPieces)),
-                        tempWalls: JSON.parse(JSON.stringify(tempWalls)),
-                        fullMovesCount,
-                        burningSquares: JSON.parse(JSON.stringify(burningSquares))
-                    });
+                    sendFullStateToPeer();
                 }
             });
 
@@ -2520,22 +2514,77 @@
 
         function sendOnlineData(data) {
             if (conn && conn.open) {
+                // Attach state snapshot to actions so players never desync
+                if (['MOVE', 'BREAK_WALL', 'SPELL_FREEZE', 'SPELL_WALL'].includes(data.type)) {
+                    data.syncState = {
+                        board: cloneBoard(board),
+                        turn: turn,
+                        castlingRights: JSON.parse(JSON.stringify(castlingRights)),
+                        enPassantTarget,
+                        spellCooldowns: JSON.parse(JSON.stringify(spellCooldowns)),
+                        frozenPieces: JSON.parse(JSON.stringify(frozenPieces)),
+                        tempWalls: JSON.parse(JSON.stringify(tempWalls)),
+                        fullMovesCount,
+                        burningSquares: JSON.parse(JSON.stringify(burningSquares))
+                    };
+                }
                 conn.send(data);
             }
         }
 
+        function requestOnlineSync() {
+            if (gameMode === 'online') {
+                if (myOnlineRole === 'w') {
+                    sendFullStateToPeer();
+                    showToast('Состояние доски отправлено сопернику!', 'success');
+                } else {
+                    sendOnlineData({ type: 'REQUEST_SYNC' });
+                    showToast('Запрос синхронизации отправлен...', 'info');
+                }
+            }
+        }
+
+        function sendFullStateToPeer() {
+            sendOnlineData({
+                type: 'INIT_STATE',
+                eventsMode,
+                chaosMode,
+                timerMode,
+                board: cloneBoard(board),
+                turn,
+                castlingRights: JSON.parse(JSON.stringify(castlingRights)),
+                enPassantTarget,
+                spellCooldowns: JSON.parse(JSON.stringify(spellCooldowns)),
+                frozenPieces: JSON.parse(JSON.stringify(frozenPieces)),
+                tempWalls: JSON.parse(JSON.stringify(tempWalls)),
+                fullMovesCount,
+                burningSquares: JSON.parse(JSON.stringify(burningSquares))
+            });
+        }
+
         function handleIncomingOnlineData(data) {
+            if (data.type === 'REQUEST_SYNC') {
+                if (myOnlineRole === 'w') {
+                    sendFullStateToPeer();
+                }
+                return;
+            }
+
             if (data.type === 'MOVE') {
                 makeMove(data.from, data.move);
+                if (data.syncState) applySyncState(data.syncState);
             } else if (data.type === 'BREAK_WALL') {
                 breakWall(data.from, data.move);
+                if (data.syncState) applySyncState(data.syncState);
             } else if (data.type === 'PROMOTION_CHOICE') {
                 board[data.r][data.c] = data.piece;
                 finishTurn();
+                if (data.syncState) applySyncState(data.syncState);
             } else if (data.type === 'SPELL_FREEZE') {
                 soundFx.play('spell');
                 frozenPieces[`${data.r},${data.c}`] = turn === 'b' ? 2 : 1;
                 spellCooldowns[turn].freeze = 6;
+                if (data.syncState) applySyncState(data.syncState);
                 renderBoard();
                 updateUI();
             } else if (data.type === 'SPELL_WALL') {
@@ -2543,6 +2592,7 @@
                 board[data.r][data.c] = 'W';
                 tempWalls[`${data.r},${data.c}`] = 4;
                 spellCooldowns[turn].wall = 10;
+                if (data.syncState) applySyncState(data.syncState);
                 renderBoard();
                 updateUI();
             } else if (data.type === 'UNDO') {
@@ -2550,26 +2600,7 @@
             } else if (data.type === 'RESET') {
                 resetGame();
             } else if (data.type === 'INIT_STATE') {
-                eventsMode = data.eventsMode;
-                chaosMode = data.chaosMode;
-                timerMode = data.timerMode;
-                if (data.board) board = data.board;
-                if (data.turn) turn = data.turn;
-                if (data.castlingRights) castlingRights = data.castlingRights;
-                if (data.enPassantTarget !== undefined) enPassantTarget = data.enPassantTarget;
-                if (data.spellCooldowns) spellCooldowns = data.spellCooldowns;
-                if (data.frozenPieces) frozenPieces = data.frozenPieces;
-                if (data.tempWalls) tempWalls = data.tempWalls;
-                if (data.fullMovesCount !== undefined) fullMovesCount = data.fullMovesCount;
-                if (data.burningSquares) burningSquares = data.burningSquares;
-
-                document.getElementById('events-mode-toggle').checked = eventsMode;
-                document.getElementById('chaos-mode-toggle').checked = chaosMode;
-                document.getElementById('timer-setting').value = timerMode;
-                
-                resetTimers();
-                renderBoard();
-                updateUI();
+                applySyncState(data);
                 showToast('Синхронизация завершена!', 'success');
             } else if (data.type === 'TIMER_CHANGE') {
                 timerMode = data.val;
@@ -2582,6 +2613,31 @@
                 chaosMode = data.enabled;
                 document.getElementById('chaos-mode-toggle').checked = chaosMode;
             }
+        }
+
+        function applySyncState(data) {
+            if (data.eventsMode !== undefined) eventsMode = data.eventsMode;
+            if (data.chaosMode !== undefined) chaosMode = data.chaosMode;
+            if (data.timerMode !== undefined) timerMode = data.timerMode;
+            if (data.board) board = data.board;
+            if (data.turn) turn = data.turn;
+            if (data.castlingRights) castlingRights = data.castlingRights;
+            if (data.enPassantTarget !== undefined) enPassantTarget = data.enPassantTarget;
+            if (data.spellCooldowns) spellCooldowns = data.spellCooldowns;
+            if (data.frozenPieces) frozenPieces = data.frozenPieces;
+            if (data.tempWalls) tempWalls = data.tempWalls;
+            if (data.fullMovesCount !== undefined) fullMovesCount = data.fullMovesCount;
+            if (data.burningSquares) burningSquares = data.burningSquares;
+
+            const eventsToggle = document.getElementById('events-mode-toggle');
+            const chaosToggle = document.getElementById('chaos-mode-toggle');
+            const timerSelect = document.getElementById('timer-setting');
+            if (eventsToggle) eventsToggle.checked = eventsMode;
+            if (chaosToggle) chaosToggle.checked = chaosMode;
+            if (timerSelect) timerSelect.value = timerMode;
+
+            renderBoard();
+            updateUI();
         }
 
         function showJoinPrompt() {
